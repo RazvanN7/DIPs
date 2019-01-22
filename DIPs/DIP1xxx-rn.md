@@ -1,200 +1,206 @@
-__mutable storage class
-=======================
+# `__mutable` storage class
 
-Proposal
---------
+| Field           | Value                                                                           |
+|-----------------|---------------------------------------------------------------------------------|
+| DIP:            | (number/id -- assigned by DIP Manager)                                          |
+| Review Count:   | 0 (edited by DIP Manager)                                                       |
+| Authors:        | Timon Gehr - timon.gehr@gmx.ch, Razvan Nitu - razvan.nitu1305@gmail.com         |
+| Implementation: | (links to implementation PR if any)                                             |
+| Status:         | Will be set by the DIP manager (e.g. "Approved" or "Rejected")                  |
 
-We introduce a new storage class `__mutable` that can be applied to fields of aggregates.
+## Abstract
 
-The `__mutable` storage class modifies propagation of type qualifiers on fields. `__mutable` data can only be manipulated in `@system` code and `__mutable` can only be applied to `private` members.
+This document proposes the addition of a new storage class, `__mutable`, that
+may be used to tag function declarations or aggregate declaration member fields.
+
+### Reference
+
+* [1] https://github.com/dlang/phobos/blob/master/std/typecons.d#L6153
+
+* [2] https://github.com/dlang/phobos/blob/master/std/container/array.d#L430
+
+* [3] https://github.com/dlang/phobos/blob/master/std/typecons.d#L2126
+
+* [4] https://github.com/dlang/phobos/blob/master/std/datetime/systime.d#L9569
+
+* [5] https://dlang.org/spec/function.html#pure-functions
+
+
+## Rationale and Motivation
+
+This section discusses compelling arguments on the necessity of the `__mutable` storage class.
+
+### The necessity of `__mutable` for aggregate declaration member fields
+
+Type qualifiers are applied transitively to all subtypes:
 
 ```d
-struct S{
-	int* p;
-	shared int* s;
-	private __mutable{
-		int* m;
-		shared int* ms;
-	}
-	//private __mutable const int* mc; // error: cannot be both __mutable and const
-	//private __mutable immutable int* imc; // error: cannot be both __mutable and immutable
-	//__mutable int* pm; // error: `__mutable` fields must be `private`
+struct A
+{
+    int a;
+    int* b;
 }
 
-struct T{
-	private __mutable int* a;
-	private{
-		__mutable int* b;
-	}
-	__mutable{
-		private int* c;
-	}
+void main()
+{
+    immutable A a;   // both a.a and a.b are immutable
+}
+```
+
+Although this design has a lot of advantages, there are some situations where some fields
+might need to be kept mutable, no matter how the instace is qualified. The following 2
+real life examples will illustrate the problem:
+
+1. The usage of the `RefCounted` struct [1] in the `Array` struct [2] in phobos:
+
+```d
+struct RefCounted(T)
+{
+    T data;
+    size_t count;
+
+    /* methods of RefCounted */
 }
 
-static assert(!__traits(isUnderUnderMutable, S.p));
-static assert(__traits(isUnderUnderMutable, S.m));
+struct Array(T)
+{
+    private struct Payload
+    {
+        T[] payload;
+        size_t capacity;
+    }
+    private RefCounted!Payload _data;
 
-//__mutable int x = 2; // error: globals and statics cannot be `__mutable`
-
-/+int* bar()@safe{
-	S s;
-	return s.m; // error: cannot access `__mutable` field `m` in `@safe` function `bar`
+    /* methods of Array */
 }
-+/
 
-void foo(inout(int)*)@safe{
-    // __mutable int* p; // error: __mutable can only be applied to field of aggregate type.
-    S s;
-	const(S) cs;
-	immutable(S) is_;
-	shared(S) ss;
-	shared(const(S)) css;
-	inout(S) ws;
-	const(inout(S)) cws;
-	shared(inout(S)) sws;
-	shared(const(inout(S))) scws;
+void main()
+{
+    immutable Array!(int*) arr;
+}
+```
 
-	// for non-__mutable fields, qualifiers are propagated (existing behavior): 
-	static assert(is(typeof(s.p)==int*));
-	static assert(is(typeof(cs.p)==const(int*)));
-	static assert(is(typeof(is_.p)==immutable(int*)));
-	static assert(is(typeof(ss.p)==shared(int*)));
-	static assert(is(typeof(css.p)==shared(const(int*))));
-	static assert(is(typeof(ws.p)==inout(int*)));
-	static assert(is(typeof(cws.p)==const(inout(int*))));
-	static assert(is(typeof(sws.p)==shared(inout(int*))));
-	static assert(is(typeof(scws.p)==shared(const(inout(int*)))));
+In the above situation, we declare an `immutable` array. By the current language rules,
+the reference counted field `_data` is `immutable` which makes the `count` member of
+`RefCounted` to also be `immutable`. This results in the imposibility to count the
+references for immutable objects in a completely encapsulated manner.
 
-	static assert(is(typeof(s.s)==shared(int*)));
-	static assert(is(typeof(cs.s)==shared(const(int*))));
-	static assert(is(typeof(is_.s)==immutable(int*)));
-	static assert(is(typeof(ss.s)==shared(int*)));
-	static assert(is(typeof(css.s)==shared(const(int*))));
-	static assert(is(typeof(ws.s)==shared(inout(int*))));
-	static assert(is(typeof(cws.s)==shared(const(inout(int*)))));
-	static assert(is(typeof(sws.s)==shared(inout(int*))));
-	static assert(is(typeof(scws.s)==shared(const(inout(int*)))));	
-	
-	// for __mutable fields, qualifier propagation is modified:
-	static assert(is(typeof(s.m)==int*));
-	static assert(is(typeof(cs.m)==int*)); // TODO: good?
-	// Requires explicit cast to mutable or shared:
-	static assert(is(typeof(*cast(int**)&cs.m))); // explicit reinterpret-casts are allowed
-	static assert(is(typeof(*cast(shared(int)**)&cs.m))); // explicit reinterpret-casts are allowed
-	static assert(is(typeof(is_.m)==shared(int*))); // immutable is implicitly shared
-	static assert(is(typeof(ss.m)==shared(int*)));
-	static assert(is(typeof(css.m)==shared(int*)));
-	static assert(is(typeof(cs.m)==int*));
-	static assert(is(typeof(ws.m)==int*)); // TODO: good?
-	static assert(is(typeof(*cast(int**)&ws.m))); // explicit reinterpret-cast
-	static assert(is(typeof(*cast(shared(int)**)&ws.m))); // explicit reinterpret-cast
-	static assert(is(typeof(cws.m)==int*)); // TODO: good?
-	static assert(is(typeof(*cast(int**)&cws.m))); // explicit reinterpret-cast
-	static assert(is(typeof(*cast(shared(int)**)&cws.m))); // explicit reinterpret-cast
-	static assert(is(typeof(sws.m)==shared(int*)));
-	static assert(is(typeof(scws.m)==shared(int*)));
+2. The usage of `Rebindable` [3] in `std.datetime` [4]:
 
-	static assert(is(typeof(s.ms)==shared(int*)));
-	static assert(is(typeof(cs.ms)==shared(int*)));
-	static assert(is(typeof(is_.ms)==shared(int*)));
-	static assert(is(typeof(ss.ms)==shared(int*)));
-	static assert(is(typeof(css.ms)==shared(int*)));
-	static assert(is(typeof(ws.ms)==shared(int*)));
-	static assert(is(typeof(cws.ms)==shared(int*)));
-	static assert(is(typeof(sws.ms)==shared(int*)));
-	static assert(is(typeof(scws.ms)==shared(int*)));
+```d
+struct Rebindable(T)
+{
+    import std.traits : Unqual;
+    private union
+    {
+        T original;
+        Unqual!T stripped;
+    }
+
+    /* other, otherwise interesting, methods */
+}
+
+class TimeZone {}
+
+struct SysTime
+{
+    Rebindable!(immutable TimeZone) _timezoneStorage;
+}
+
+void main()
+{
+    immutable SysTime a;
 }
 
 ```
 
-I.e. `immutable` and `const` will be transitive with the exception of `__mutable` fields. Mutating `__mutable` fields has defined behavior.
-This also holds for the cases where typing rules cannot determine the `shared` status: in `@system` code, casting to the correct `shared`/un`shared` mutable type and mutating the memory is defined behavior.
+When a `SysTime` instance is declared as `immutable`, the `Rebindable` object in `SysTime` is also
+made `immutable` rendering it useless: the whole point of a rebindable object is to bind it to
+something else.
 
-Mutating memory through typecast `const`/`immutable` references continues to possibly cause undefined behavior.
+3. Allocators are usually declared as part of the object they are used for. If an instance of the mentioned
+object is `immutable`, the allocator will not be able to modify its internal data.
 
-Interaction with `pure`
-=======================
+In all of these situations the transitivity of qualifiers makes it difficult to write clean, encapsulated
+code. In order to mitigate these issues, a mean of breaking the transitivity of qualifiers is needed. This
+is were `__mutable` steps in: it can be used in the declaration of a member field to excerpt it from the
+qualifier propagation of a certain instance. For example:
 
-We want strong guarantees even with `__mutable`, therefore we should define `pure` and `immutable` in terms of transformations/rules. To define the rules, I will use function invocations for simplicity, but the same rules would apply to sequences of statements. Imagine the D program in SSA, and consider any assignment right hand side a "function", either pure or impure.
+```d
+struct RefCounted(T)
+{
+    T data;
+    size_t count;
 
+    /* methods of RefCounted */
+}
 
-(*NOTE": The following idea might need some more work.
+struct Array(T)
+{
+    private struct Payload
+    {
+        T[] payload;
+        size_t capacity;
+    }
+    private __mutable RefCounted!Payload _data;
 
-Let "basic semantics" be the semantics of the D programming language when eliding all type qualifiers.
+    /* methods of Array */
+}
 
-The sense in which those rules hold is:
-
-- A program that does not throw an error nor has undefined behavior, but can be transformed into a program that throws an error or has undefined behavior, itself has undefined behavior.
-
-- A program that throws an error using basic semantics, but can be transformed into a program that does not throw an error using basic semantics has undefined behavior.
-)
-
-Basic Rules
------------
-
-- A strongly pure function (that return types without indirections) will return the same result when applied to the same `immutable` arguments. (Regardless of how many intermediate interactions happen.) For return types with indirections, the function will always return a data graph with isomorphic mutable aliasing.
-
-- The set of references returned from strongly `pure` functions can be safely converted to `immutable` or `shared`.
-
-- A strongly `pure` function whose result is not used may be safely elided.
-
-- If we have two subsequent `pure` function invocations `foo(args1...)` and `bar(args2...)` where data transitively reachable from `args1` and `args2` only overlaps in `immutable` and `const` data (this includes data accessed through `__mutable` fields of `const` and `immutable` objects), the two invocations may safely swap their order (of course, this only applies if none of the two functions takes arguments).
-
-- A strongly `pure` function invocation can always exchange order with an adjacent impure function invocation.
-
-
-I.e., the two programs
-
-```
-// create args1/args2, and more arguments
-auto a = foo(args1...);
-auto b = bar(args2...);
-// use a and b
+void main()
+{
+    immutable Array!(int*) arr;
+}
 ```
 
-and
+Now that the `RefCounted` object is marked as `__mutable`, it can be modified internally, by both
+its methods and those of `Array`, and therefore it can be used properly to track the reference count
+of that particular object, even though the object itself is `immutable`.
 
+### Necessity of `__mutable` for function declarations
+
+The D language implements a purity system that is based on strongly and weakly `pure` functions [5].
+The primary benefit of `pure` functions is that they are building blocks for compiler optimizations,
+however, currently, the DMD compiler does not apply any of the optimization techniques that could
+be employed. The reason for this is that the weak purity model invalidates the basic optimization
+techniques used for strongly `pure` functions. In order to better understand the nature of the
+problem, let us see what kind of optimizations may be applied for strongly `pure` functions and how
+can these be used for D code.
+
+Some of the basic optimizations for strongly `pure` functions are:
+1. A strongly `pure` function whose result is not used can be safely elided.
+2. A strongly `pure` function invocation can always exchange order with an adjacent impure function invocation.
+
+```d
+int foo() pure
+{
+     immutable(T)* x = allocate();
+     int y = bar(x);
+     deallocate(x);
+     return y;
+}
 ```
-// create args1/args2, and more arguments
-auto b = bar(args2...);
-auto a = foo(args1...);
-// use a and b
+
+`foo` is a strongly `pure` function, since it does not access any global mutable data and it does not
+receive any parameters. `allocate`, `bar` and `deallocate` are also strongly `pure` functions. In this
+situation the compiler may apply the above stated optimizations, leading to the following possible
+transformations:
+
+```d
+// optimization 1
+int foo() pure
+{
+     immutable(T)* x = allocate();
+     int y = bar(x);
+     return y;
+} // memory leak
+
+// optimization 2
+int foo() pure
+{
+     immutable T* x = allocate();
+     deallocate(x);
+     int y = bar(x); // use after free
+     return y;
+}
 ```
-
-are always interchangeable.
-
-__mutable functions
--------------------
-
-Functions that are annotated with `__mutable` are exempt from those rules. `__mutable` functions must be `pure` and `@system`/`@trusted`. `@trusted` `pure` functions that call `@system` `__mutable` functions therefore must ensure that the above rules will be valid for `pure` functions calling the `@trusted` functions.
-
-*IMPORTANT*: Note that this means that accessing memory addresses and identities of `immutable` data must be made un`@safe` in `pure` functions. (For example, with `is` expressions.)
-
-Rationale: `__mutable` functions can be used to conveniently break the rules while implementing abstractions, to finally build up a higher-level abstraction that satisfies the rules. One use case for `__mutable` functions is deallocation.
-
-
-Common Subexpression Elimination
---------------------------------
-
-The following rule enables common subexpression elimination:
-
-- `__mutable` functions can only be called from other `__mutable` functions or `pure` destructors.
-
-(Note that this rule need not be part of the language definition, as there may be more loose conditions that make the rule below work, but it would make sense to make the type system check it.)
-
-We can then add the following common subexpression elimination rule:
-
-- If we have two (identical) strongly `pure` (non-`__mutable`) function calls `auto a = foo(arg)` and `auto b = foo(arg)` we can transform to `auto a = foo(arg)` and `auto b = a`.
-
-Rationale: This allows common subexpression elimination/referential transparency, the main important property of `pure` functions.
-           The main issue with common subexpression elimination is that deallocation may become tricky unless it all happens in destructors.
-
-
-Other Considerations
-====================
-
-- It is a small problem that `immutable` is implicitly `shared`. This only makes total sense when `immutable` memory cannot be modified transitively.
-  `__mutable` breaks this, therefore there is no safe way to support `__mutable` for `const` references. The solution proposed above essentially requires the implementation to record whether the current object is shared or not.
-
-  Alternatively, we might consider having separate (unshared) `immutable` and `shared immutable` types, such that we know that `const` memory is unshared and `shared const` memory is shared.
-
