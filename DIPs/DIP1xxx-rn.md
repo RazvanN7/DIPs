@@ -210,6 +210,8 @@ struct T
 }
 ```
 
+### Restrictions
+
 Global/Local and static variables cannot be `__mutable`:
 
 ```d
@@ -241,16 +243,18 @@ int* bar() @safe
 }
 ```
 
+### `shared`
+
 Because `immutable` is implicitly `shared`, `__mutable` fields of `immutable` instances
 are regarded as `shared` in order to be thread-safe:
 
 ```d
 struct S
 {
-    private `__mutable` int* p;
+    private __mutable int* p;
 }
 immutable S s;
-static assert(is(typeof(s.m) == shared(int*)));
+static assert(is(typeof(s.p) == shared(int*)));
 ```
 
 `const` references to objects may come from mutable, `const` and `immutable` objects, therefore
@@ -294,15 +298,17 @@ void main()
 ```
 
 `inout` references to objects may come from mutable, `const` and `immutable` objects. This similarity to
-`const` objects makes `inout` object instances with `__mutable fields` to be treated exactly the same as
+`const` objects makes `inout` object instances with `__mutable` fields to be treated exactly the same as
 `const` ones.
+
+### `pure`
 
 With the addition of `__mutable`, references to `immutable` instances do not offer the same purity guarantees when passed as function arguments:
 
 ```d
 struct S
 {
-    private `__mutable` int* p;
+    private __mutable int* p;
 
     void inc() immutable pure
     {
@@ -326,6 +332,6 @@ void main()
 
 Before this DIP, `foo` would have been regarded as a strongly pure function, but with the addition
 of `__mutable`, `foo` becomes a weakly `pure` function due to the fact that `immutable` instances
-can now be modified through `__mutable fields`. After this DIP, a function that receives immutable
-ref/ptr parameters will be regarded as strongly `pure` if and only if the parameters do not contain
+can now be modified through `__mutable` fields. After this DIP, a function that receives immutable
+ref/pointer parameters will be regarded as strongly `pure` if and only if the parameters do not contain
 any `__mutable` fields.
