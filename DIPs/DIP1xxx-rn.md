@@ -43,9 +43,9 @@ void main()
 }
 ```
 
-Although this design has a lot of advantages, there are some situations where some fields
-might need to be kept mutable, no matter how the instace is qualified. The following
-real life examples will illustrate the problem:
+But there are situations where specific fields might need to be kept mutable,
+no matter how the instance is qualified. The following real life examples
+will illustrate the problem:
 
 1. The usage of the `RefCounted` struct [1] in the `Array` struct [2] in phobos:
 
@@ -155,7 +155,7 @@ of that particular object, even though the object itself is `immutable`.
 
 ## Semantics
 
-The `__mutable` storage class modifies propagation of type qualifiers on fields. `__mutable` can only be applied to `private` members.
+The `__mutable` storage class modifies propagation of type qualifiers on fields. `__mutable` can only be applied to `private`, mutable members.
 
 ```d
 struct S
@@ -167,10 +167,9 @@ struct S
         int* m;
         shared int* ms;
     }
-
+    __mutable int* pm; // error: `__mutable` fields must be `private`
     private __mutable const int* mc; // error: cannot be both __mutable and const
     private __mutable immutable int* imc; // error: cannot be both __mutable and immutable
-    __mutable int* pm; // error: `__mutable` fields must be `private`
 }
 ```
 
@@ -254,17 +253,49 @@ immutable S s;
 static assert(is(typeof(s.m) == shared(int*)));
 ```
 
-Although `const` is not implicitly `shared`, `__mutable` fields of `const` instances
-also need to be regarded as `shared` to be thread-safe:
+`const` references to objects may come from mutable, `const` and `immutable` objects, therefore
+the type system cannot infer whether the `__mutable` field inside the object should be shared
+or unshared. `__mutable` fields of `const` objects will be type checked as being unshared mutable,
+leaving upon the user to reason upon the code make the appropriate casts:
 
 ```d
-struct S
+shared int* q;
+int* r;
+
+struct A
 {
-    private `__mutable` int* p;
+    private __mutable int* p;
+    bool isImmutable;
+
+    this(shared int *p) immutable
+    {
+        this.p = p;
+        isImmutable = true;
+    }
+
+    void fun() const
+    {
+        pragma(msg, typeof(p).stringof); // typeof(p) => int*
+        if (isImmutable)
+            q = cast(shared int*) p;
+        else
+            r = p;
+    }
 }
-const S s;
-static assert(is(typeof(s.m) == shared(int*)));
+
+void main()
+{
+    shared int* p
+    immutable A ia = immutable A(p);
+    const A ca;
+    ia.fun();
+    ca.fun();
+}
 ```
+
+`inout` references to objects may come from mutable, `const` and `immutable` objects. This similarity to
+`const` objects makes `inout` object instances with `__mutable fields` to be treated exactly the same as
+`const` ones.
 
 With the addition of `__mutable`, references to `immutable` instances do not offer the same purity guarantees when passed as function arguments:
 
@@ -298,4 +329,3 @@ of `__mutable`, `foo` becomes a weakly `pure` function due to the fact that `imm
 can now be modified through `__mutable fields`. After this DIP, a function that receives immutable
 ref/ptr parameters will be regarded as strongly `pure` if and only if the parameters do not contain
 any `__mutable` fields.
-
