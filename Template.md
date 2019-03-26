@@ -14,16 +14,13 @@ Required.
 
 Short and concise description of the idea in a few lines.
 
-### Reference
-
-Optional links to reference material such as existing discussions, research papers
-or any other supplementary materials.
 
 ## Contents
 * [Rationale](#rationale)
 * [Description](#description)
 * [Breaking Changes and Deprecations](#breaking-changes-and-deprecations)
-* [Acknowledgements](#acknowledgements)
+* [Reference](#reference)
+* [Copyright & License](#copyright--license)
 * [Reviews](#reviews)
 
 ## Rationale
@@ -53,6 +50,10 @@ supposed to handle breakage in a non-intrusive manner. Changes that may break
 user code and have no well-defined deprecation process have a minimal chance of
 being approved.
 
+## Reference
+
+Optional links to reference material such as existing discussions, research papers
+or any other supplementary materials.
 
 ## Copyright & License
 
@@ -60,7 +61,7 @@ Copyright (c) 2018 by the D Language Foundation
 
 Licensed under [Creative Commons Zero 1.0](https://creativecommons.org/publicdomain/zero/1.0/legalcode.txt)
 
-## Review
+## Reviews
 
 The DIP Manager will supplement this section with a summary of each review stage
 of the DIP process beyond the Draft Review.
