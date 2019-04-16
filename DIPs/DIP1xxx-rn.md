@@ -1,16 +1,16 @@
-# `__mutable` storage class
+# `__metadata` storage class
 
 | Field           | Value                                                                           |
 |-----------------|---------------------------------------------------------------------------------|
 | DIP:            | (number/id -- assigned by DIP Manager)                                          |
 | Review Count:   | 0 (edited by DIP Manager)                                                       |
-| Authors:        | Timon Gehr - timon.gehr@gmx.ch, Razvan Nitu - razvan.nitu1305@gmail.com         |
+| Authors:        | Razvan Nitu (razvan.nitu1305@gmail.com), Andrei Alexandrescu (andrei@erdani.com)|
 | Implementation: | (links to implementation PR if any)                                             |
 | Status:         | Will be set by the DIP manager (e.g. "Approved" or "Rejected")                  |
 
 ## Abstract
 
-This document proposes the addition of a new storage class, `__mutable`, that
+This document proposes the addition of a new storage class, `__metadata`, that
 may be used to tag function declarations or aggregate declaration member fields.
 
 ### Reference
@@ -119,7 +119,7 @@ object is `immutable`, the allocator will not be able to modify its internal dat
 
 In all of these situations the transitivity of qualifiers makes it difficult to write clean, encapsulated
 code. In order to mitigate these issues, a mean of breaking the transitivity of qualifiers is needed. This
-is were `__mutable` steps in: it can be used in the declaration of a member field to excerpt it from the
+is were `__metadata` steps in: it can be used in the declaration of a member field to excerpt it from the
 qualifier propagation of a certain instance. For example:
 
 ```d
@@ -138,7 +138,7 @@ struct Array(T)
         T[] payload;
         size_t capacity;
     }
-    private __mutable RefCounted!Payload _data;
+    private __metadata RefCounted!Payload _data;
 
     /* methods of Array */
 }
@@ -149,47 +149,47 @@ void main()
 }
 ```
 
-Now that the `RefCounted` object is marked as `__mutable`, it can be modified internally, by both
+Now that the `RefCounted` object is marked as `__metadata`, it can be modified internally, by both
 its methods and those of `Array`, and therefore it can be used properly to track the reference count
 of that particular object, even though the object itself is `immutable`.
 
 ## Semantics
 
-The `__mutable` storage class modifies propagation of type qualifiers on fields. `__mutable` can only be applied to `private`, mutable members.
+The `__metadata` storage class modifies propagation of type qualifiers on fields. `__metadata` can only be applied to `private`, mutable members.
 
 ```d
 struct S
 {
     int* p;
     shared int* s;
-    private __mutable
+    private __metadata
     {
         int* m;
         shared int* ms;
     }
-    __mutable int* pm; // error: `__mutable` fields must be `private`
-    private __mutable const int* mc; // error: cannot be both __mutable and const
-    private __mutable immutable int* imc; // error: cannot be both __mutable and immutable
+    __metadata int* pm; // error: `__metadata` fields must be `private`
+    private __metadata const int* mc; // error: cannot be both __metadata and const
+    private __metadata immutable int* imc; // error: cannot be both __metadata and immutable
 }
 ```
 
-`immutable` and `const` will be transitive with the exception of `__mutable` fields. Mutating `__mutable` fields has defined behavior:
+`immutable` and `const` will be transitive with the exception of `__metadata` fields. Mutating `__metadata` fields has defined behavior:
 
 ```d
 struct S
 {
     int p;
-    private __mutable int m;
+    private __metadata int m;
 
     void increment() immutable
     {
-        ++m;       // ok, m is __mutable
+        ++m;       // ok, m is __metadata
         ++p;       // error: cannot modify field p of immutable instance of S
     }
 }
 ```
 
-`__mutable` does not apply transitively:
+`__metadata` does not apply transitively:
 
 ```d
 struct RefCount
@@ -200,7 +200,7 @@ struct RefCount
 
 struct T
 {
-    private __mutable RefCount s;
+    private __metadata RefCount s;
 
     void updateRC() immutable
     {
@@ -212,55 +212,55 @@ struct T
 
 ### Restrictions
 
-Global/Local and static variables cannot be `__mutable`:
+Global/Local and static variables cannot be `__metadata`:
 
 ```d
 module jaja;
-__mutable int x = 2; // error: global variable cannot be `__mutable`
+__metadata int x = 2; // error: global variable cannot be `__metadata`
 int fun()
 {
-    __mutable int y;    // error: local variable cannot be `__mutable`
+    __metadata int y;    // error: local variable cannot be `__metadata`
 }
 
 struct S
 {
-    private `__mutable` static int b;    // error: static variable cannot be `__mutable`
+    private __metadata static int b;    // error: static variable cannot be `__metadata`
 }
 ```
 
-`__mutable` data can only be manipulated in `@system` code:
+`__metadata` data can only be manipulated in `@system` code:
 
 ```d
 struct S
 {
-    private __mutable int* m;
+    private __metadata int* m;
 }
 
 int* bar() @safe
 {
     S s;
-    return s.m; // error: cannot access `__mutable` field `m` in `@safe` function `bar`
+    return s.m; // error: cannot access `__metadata` field `m` in `@safe` function `bar`
 }
 ```
 
 ### `shared`
 
-Because `immutable` is implicitly `shared`, `__mutable` fields of `immutable` instances
+Because `immutable` is implicitly `shared`, `__metadata` fields of `immutable` instances
 are regarded as `shared` in order to be thread-safe:
 
 ```d
 struct S
 {
-    private __mutable int* p;
+    private __metadata int* p;
 }
 immutable S s;
 static assert(is(typeof(s.p) == shared(int*)));
 ```
 
 `const` references to objects may come from mutable, `const` and `immutable` objects, therefore
-the type system cannot infer whether the `__mutable` field inside the object should be shared
-or unshared. `__mutable` fields of `const` objects will be type checked as being unshared mutable,
-leaving upon the user to reason upon the code make the appropriate casts:
+the type system cannot infer whether the `__metadata` field inside the object should be shared
+or unshared. `__metadata` fields of `const` objects will be type checked as being unshared mutable,
+leaving upon the user to reason upon the code to make the appropriate casts:
 
 ```d
 shared int* q;
@@ -268,7 +268,7 @@ int* r;
 
 struct A
 {
-    private __mutable int* p;
+    private __metadata int* p;
     bool isImmutable;
 
     this(shared int *p) immutable
@@ -298,17 +298,17 @@ void main()
 ```
 
 `inout` references to objects may come from mutable, `const` and `immutable` objects. This similarity to
-`const` objects makes `inout` object instances with `__mutable` fields to be treated exactly the same as
+`const` objects makes `inout` object instances with `__metadata` fields to be treated exactly the same as
 `const` ones.
 
 ### `pure`
 
-With the addition of `__mutable`, references to `immutable` instances do not offer the same purity guarantees when passed as function arguments:
+With the addition of `__metadata`, references to `immutable` instances do not offer the same purity guarantees when passed as function arguments:
 
 ```d
 struct S
 {
-    private __mutable int* p;
+    private __metadata int* p;
 
     void inc() immutable pure
     {
@@ -331,7 +331,7 @@ void main()
 ```
 
 Before this DIP, `foo` would have been regarded as a strongly pure function, but with the addition
-of `__mutable`, `foo` becomes a weakly `pure` function due to the fact that `immutable` instances
-can now be modified through `__mutable` fields. After this DIP, a function that receives immutable
+of `__metadata`, `foo` becomes a weakly `pure` function due to the fact that `immutable` instances
+can now be modified through `__metadata` fields. After this DIP, a function that receives immutable
 ref/pointer parameters will be regarded as strongly `pure` if and only if the parameters do not contain
-any `__mutable` fields.
+any `__metadata` fields.
