@@ -264,8 +264,8 @@ struct A
 void main()
 {
     A a;
-    A b = S(a);      // move constructor is called explicitly, no need to insert another call
-    A c = S(7);      // constructor call, no need to insert move constructor call
+    A b = A(a);      // move constructor is called explicitly, no need to insert another call
+    A c = A(7);      // constructor call, no need to insert move constructor call
 }
 ```
 
@@ -399,9 +399,84 @@ This is problematic for perfect forwarding because if `fun` is called with
 an rvalue, the rvalueness cannot pe forwarded to the wrapped function.
 
 The solution proposed by this DIP is to identify via a dataflow analysis algorithm the
-last access of an rvalue parameter/local variable and handle it as an rvalue access.
+last access of a by value parameter/local variable and handle it as an rvalue access.
 This simple enhacement does not only solve the perfect forwarding problem but also it
 makes the code in certain situations more efficient without any user intervention.
+
+#### Dataflow Analysis Algorithm
+
+The access of a variable `x` is considered the last access in a function if :
+
+  * `x` is part of a `return` statement;
+  * there are no other statements that access `x` until the end of the function
+    and no gotos pointing to a label that precedes the access of `x`;
+
+The algorithm that identifies the last access of `x` is the following:
+
+  * Each statement in the function body is analyzed in the order of appearance
+    in user code;
+  * If a statement does not access `x` it is skipped;
+  * If a statement does access `x`, it will be marked as the new last access,
+    while the previous marked statement will be cleared. If the previous last access
+    was a `return` statement, then it will not be cleared. `return` statements that
+    access `x` are always the last access of it.
+  * `while`/`for`/`do-while`/`foreach` statements that contain accesses of `x`
+    will not be considered candidates for last access, except if the accesses
+    are inside `return` statements;
+  * If a statement that accesses `x` is preceded by a label and between the mentioned
+    statement and the end of the function scope there is a goto pointing to the mentioned
+    label, the access will not be considered a candidate for last access;
+
+Example:
+
+```d
+void gun(int);
+void sun(int);
+void run(int);
+int bun(int);
+
+int fun(int x)
+{
+    if (x < 2)
+        gun(x);
+    else
+        sun(x);
+
+label1:
+    if (bun(x) < 0)
+        goto label1;
+
+    if (bun(x) > 5)
+        goto label2;
+
+    run(x);
+label2:
+    return x;
+}
+```
+
+In the above example, the first use of `x` is in the line `x < 2`. The statement is then considered,
+for the moment, the last access of `x` and it will be marked as such. Next, the bodies of the `if`
+and the `else` branch will be considered: both access `x`, but since the execution is going to take
+one path or the other, both accesses are considered to be the last access, thus clearing `x < 2`.
+When `bun(x) < 0` is encountered, it will be considered as a candidate for last access, but only if there
+are no `goto`'s targeting `label1` until the end of the function scope. When `goto label1` is encountered,
+`bun(x) < 0` is dropped from the list of candidates. At this point, there is not statement that we can
+safely consider as being the last access of `x`. The analysis continues with `if(bun(x) > 5`, which
+becomes the new candidate; the statement `goto label2` is ignored, because gotos that jump in the
+front do not affect the algorithm. When `run(x)` is encountered, it will become the new last access,
+while clearing the previous one. Finally, when `return x` is reached it becomes the last access and
+it cleares `run(x)` from the list of candidates.
+
+`e1 || e2` and `e1 && e2` expressions are treated the following way:
+
+  * if `e1` accesses `x` and `e2` does not, then `e1` is the last access of `x`;
+  * if `e2` accesses `x` and `e1` does not, then `e2` is the last access of `x`;
+  * if both `e1` and `e2` access `x`, then `e2` is the last access of `x`;
+
+If the `||` and `&&` operators are present in the condition or body of repetitive instructions
+(`for`, `while` etc.) the acceese to `x` will not be considered last access candidates.
+
 
 ### Limitations
 
