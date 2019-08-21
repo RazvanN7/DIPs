@@ -12,16 +12,25 @@
 
 ## Abstract
 
-DIP1014 [1] states the problem the D programming language currently exhibits with
-regard to move semantics and proposes a solution in the form of a postblit-like
-callback method called `opPostMove`. In parallel with the development of DIP1014,
-DIP1018 [2] has uncovered a series of issues that affect the postblit which ultimately
-led to the decision of replacing it with a classical copy constructor.  The postblit-like
-nature of the `opPostMove` function makes it susceptible to the same issues encountered in
-DIP1018.
+Currently, the DMD compiler does not perform any move operations: rvalues
+are typically constructed into a temporary and then blitted to the destination,
+eliding the destruction of the source. This leads to the missing of some
+optimization opportunities in certain scenarios, that could be easily implemented.
+However, if the moving of objects would be implemented, with the current state of
+affaires, it would lead to the impossibility of implementing certain programming patterns
+like `struct`s that contain internal pointers and `struct`s that register themselves in a
+global registry.
+
+DIP1014 [1] details the above mentioned scenarios and proposes a solution in
+the form of a postblit-like callback method called `opPostMove`. In parallel with the
+development of DIP1014, DIP1018 [2] has uncovered a series of issues that affect the
+postblit which ultimately led to the decision of replacing it with a classical copy constructor.
+The postblit-like nature of the `opPostMove` function makes it susceptible to the same issues
+encountered in DIP1018.
 
 The current DIP highlights the above mentioned issues and proposes the implementation of a
-C++ style move constructor as an alternative solution.
+C++ style move constructor as an alternative solution to enable the compiler to perform
+move operations in a controlled manner.
 
 ## Contents
 * [Rationale](#rationale)
@@ -36,8 +45,56 @@ C++ style move constructor as an alternative solution.
 
 ### Move semantics
 
-This DIP forwards the rationale presented in DIP1014 for the necessity of defining
-move semantics.
+Even though it is specified that D compilers may perform move operations, DMD
+currently never actually moves, although there are situations where it would make
+sense to do so (while preserving correctness):
+
+1. Forwarding a parameter passed by value or a local variable to another function:
+
+```d
+struct VeryBigStruct { /* 1 GB of data */ }
+
+void gun(VeryBigStruct s);
+void main()
+{
+    VeryBigStruct s = VeryBigStruct(/*some params*/);
+    /* do something */
+    gun(s);
+    /* do other stuff, but s is not accessed anymore */
+}
+```
+
+In the above situation, `s` was constructed on the stack supposedly initializing 1GB of
+data. When `s` is passed to `gun`, a copy of it is going to be performed, allocating and
+initializing a new `VeryBigStruct` object. Considering that `s` is no longer used
+in the `main` function, the compiler could take advantage of this situation and perform
+a move, thus "stealing" the already allocated object. This will result in eliding a copy
+constructor call (avoiding the initialization cost) and also a destructor call. It is safe
+to do so because `s` is no longer used after it has been moved.
+
+2. Working with uncopyable objects
+
+```d
+struct A
+{
+    @disable this(ref A rhs) {}
+}
+
+void fun(A a) {}
+void main()
+{
+    A a;
+    fun(a);     // error: A cannot be copied
+}
+```
+
+The above code will not compile as `A` is uncopyable and `fun` receives its parameter by
+value so a copy of `a` should be performed, however, since `fun(a)` is the last access of `a`
+it can be safely moved.
+
+If such operations would be implemneted in the compiler, the user would have no means
+to control the moving of objects. DIP1014 proposed a solution for this problem, however
+it leverages a flawed and soon to be deprecated component: the postblit.
 
 ### DIP1014 Issues
 
@@ -61,34 +118,27 @@ void __move_post_blt(S)(ref S newLocation, ref S oldLocation) nothrow if( is(S==
 
 From the above definition it can be deduced that `opPostMove` (that is called internally by
 `__move_post_blt`) will get called solely in situations where the source and the destination
-have the same type or one of the types is implicitly convertible to the other. This makes it
-so that the following valid code will be rejected:
+have the same type. This makes it so that the following valid code will be rejected:
 
 ```d
-struct D
+struct VeryBigStruct
 {
-    D* p;
-    void opPostMove(immutable ref D oldLocation)
-    {
-        p = oldLocation.getP();
-    }
-
-    D* getP() immutable
-    {
-        return cast()p;
-    }
+    /* 1 GB of data */
+    void opPostMove(const ref VeryBigStruct) {}
 }
 
-immutable(D) fun();
-
+void gun(VeryBigStruct s);
 void main()
 {
-    D d = fun();    // error: `__move_post_blt` does not match template declaration
+    const VeryBigStruct s = VeryBigStruct(/*some params*/);
+    /* do something */
+    gun(s);               // s may be moved
+    /* do other stuff, but s is not accessed anymore */
 }
 ```
 
-In this situation, the source type is `immutable D`, while destination type is `D`. Even though the
-`opPostMove` function is correctly defined, it will never get called because the signature of
+In this situation, the source type is `const D` (`typeof(s)`), while destination type is `D`. Even though the
+`opPostMove` function is correctly defined, it will not get called because the signature of
 `__move_post_blt` function in druntime does not accomodate the handling of differently qualified
 sources and destinations. It seems that the intention in DIP1014 (following the postblit guidelines)
 was to handle solely same source-destination types.
@@ -144,7 +194,7 @@ might be to typecheck `opPostMove` as if it were a constructor, but this is prob
 to the state of the field (raw or cooked) after the blitting phase (consult DIP1018 for an extensive
 explanation).
 
-While point (1) may be mitigated by changing the signature of `__move_post_blt`, point (2) cannot be
+Although point (1) may be mitigated by changing the signature of `__move_post_blt`, point (2) cannot be
 solved, as discussed in DIP1018.
 
 ### Introducing the Move Constructor
@@ -182,20 +232,7 @@ struct A
     this(A rhs) { writeln("x"); }                     // move constructor
     this(A rhs, int b = 7) immutable { writeln(b); }  // move constructor with default parameter
 }
-
-A fun();
-
-void main()
-{
-    A a;
-    A b = fun();           // calls move constructor implicitly - prints "x"
-    A c = A(fun());        // calls constructor explicitly
-    immutable A d = fun(); // calls move constructor implicittly - prints 7
-}
 ```
-
-The move constructor may also be called explicitly (as shown above in the line introducing c)
-because it is also a constructor within the preexisting language semantics.
 
 Type qualifiers may be applied to the parameter of the move constructor and also to the function
 itself, in order to allow defining moves across objects of different mutability levels. The
@@ -209,65 +246,14 @@ constructor and other language features.
 #### Move Constructor Usage
 
 A call to the move constructor is implicitly inserted by the compiler whenever a `struct` variable
-is initialized from an rvalue of the same unqualified type:
+is moved in memory: whevener an rvalue is passed as a function parameter, the move constructor will
+be called.
 
-1. When a variable is explicitly initialized:
-
-```d
-struct A
-{
-    this(A rhs) {}
-}
-
-A fun();
-
-void main()
-{
-    A a;
-    A b = fun();     // move constructor gets called
-    b = fun();       // assignment, not initialization
-}
-```
-
-2. When a parameter is passed by value to a function:
-
-```d
-struct A
-{
-    this(A rhs) {}
-}
-
-A gun();
-void fun(A a);
-
-void main()
-{
-    A a;
-    fun(gun());    // move constructor gets called
-}
-```
-
-When a function returns an rvalue there is no need to call the move constructor
-as RVO (return value optimization) will be performed and the resulting `struct`
-instance will be constructed in the caller stack.
-
-Note that calls to the move constructor will not be implicitly inserted for constructor
-calls:
-
-```d
-struct A
-{
-    this(A rhs) {}
-    this(int b) {}
-}
-
-void main()
-{
-    A a;
-    A b = A(a);      // move constructor is called explicitly, no need to insert another call
-    A c = A(7);      // constructor call, no need to insert move constructor call
-}
-```
+When returning from a function, the result is either an rvalue or an lvalue. If the result
+is an rvalue, in all situations RVO is going to be performed; if the result is an lvalue,
+then either NRVO is going to be applied, or the copy constructor is going to get called.
+If NRVO cannot be performed, it means that the returned object is referenced from outside
+the function so it also cannot be moved.
 
 #### Overloading
 
@@ -282,17 +268,6 @@ struct A
     this(immutable A another) {}              // 2 - immutable source, mutable destination
     this(A another) immutable {}              // 3 - mutable source, immutable destination
     this(immutable A another) immutable {}    // 4 - immutable source, immutable destination
-}
-
-A fun();
-immutable(A) gun();
-
-void main()
-{
-    A a = fun();                    // calls 1
-    A b = gun();                    // calls 2
-    immutable A c = fun();          // calls 3
-    immutable A d = gun();          // calls 4
 }
 ```
 
@@ -315,18 +290,14 @@ struct A
     int* p;
     @disable this(A rhs) {}
     this(immutable A rhs) {}
-    void opAssign(A rhs) {}
+    A opAssign(A rhs) {}
 }
 
-A fun();
-immutable(A) gun();
 
 void main()
 {
-    A a = fun();  // error: disabled move constructor
-    A b = gun();  // ok
-    a = fun();    // opAssign is used, but still error
-
+    A a;
+    a = fun();
 }
 ```
 
@@ -346,11 +317,13 @@ struct A
     this(A rhs) {}
 }
 
-immutable(A) fun();
+void fun(immutable A);
 
 void main()
 {
-    immutable A a = fun();       // error: cannot call move constructor type (immutable A) immutable
+    immutable A a;
+    fun(a);           // error: cannot call move constructor type (immutable A) immutable
+                      // this is a the last access of a, so it can be treated as an rvalue
 }
 ```
 
@@ -369,9 +342,14 @@ If the restrictions above are met, the following move constructor is generated:
 this(inout(S) src) inout
 {
     foreach (i, ref inout field; src.tupleof)
-        this.tupleof[i] = field;
+        this.tupleof[i].moveConstructor(field);
 }
 ```
+
+Note that the above code is going to access each field in the source exactly once,
+this means that each can be treated as an rvalue, thus calling the move constructor.
+If a specific field does not define a move constructor the generated move constructor
+is going to fail to typecheck and it will be annotated with `@disable`.
 
 ### Perfect Forwarding
 
@@ -476,6 +454,11 @@ it cleares `run(x)` from the list of candidates.
 
 If the `||` and `&&` operators are present in the condition or body of repetitive instructions
 (`for`, `while` etc.) the acceese to `x` will not be considered last access candidates.
+
+Whenever the address of an rvalue parameter/local variable is taken it will lose the
+possibility of being treated as an rvalue upon its last access. If the user knows
+that an access is the last access of an lvalue, it can use the `move` function in
+`std.algorithm.mutation`, thus transforming the lvalue into an rvalue.
 
 
 ### Limitations
