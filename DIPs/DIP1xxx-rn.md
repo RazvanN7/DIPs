@@ -12,19 +12,19 @@
 
 ## Abstract
 
-Currently, the DMD compiler does not perform any move operations: rvalues
-are typically constructed into a temporary and then blitted to the destination,
-eliding the destruction of the source. This leads to the missing of some
-optimization opportunities in certain scenarios, that could be easily implemented.
+Currently, the DMD compiler does not perform any move operations: function return values
+are typically constructed directly in the destination memory, eliding the destruction of
+the source, an optimization known as Return Value Optimization. This leads to the missing
+of some optimization opportunities in certain scenarios, that could be easily implemented.
 However, if the moving of objects would be implemented, with the current state of
-affaires, it would lead to the impossibility of implementing certain programming patterns
+affairs, it would lead to the impossibility of implementing certain programming patterns
 like `struct`s that contain internal pointers and `struct`s that register themselves in a
 global registry.
 
 DIP1014 [1] details the above mentioned scenarios and proposes a solution in
 the form of a postblit-like callback method called `opPostMove`. In parallel with the
 development of DIP1014, DIP1018 [2] has uncovered a series of issues that affect the
-postblit which ultimately led to the decision of replacing it with a classical copy constructor.
+postblit, which ultimately led to the decision of replacing it with a classical copy constructor.
 The postblit-like nature of the `opPostMove` function makes it susceptible to the same issues
 encountered in DIP1018.
 
@@ -46,18 +46,18 @@ move operations in a controlled manner.
 ### Move semantics
 
 Even though it is specified that D compilers may perform move operations, DMD
-currently never actually moves, although there are situations where it would make
+currently never moves, although there are situations in whic it would make
 sense to do so (while preserving correctness):
 
 1. Forwarding a parameter passed by value or a local variable to another function:
 
 ```d
-struct VeryBigStruct { /* 1 GB of data */ }
+struct ExpensiveStruct { /* 1 GB of data */ }
 
-void gun(VeryBigStruct s);
+void gun(ExpensiveStruct s);
 void main()
 {
-    VeryBigStruct s = VeryBigStruct(/*some params*/);
+    ExpensiveStruct s = ExpensiveStruct(/*some params*/);
     /* do something */
     gun(s);
     /* do other stuff, but s is not accessed anymore */
@@ -66,13 +66,13 @@ void main()
 
 In the above situation, `s` was constructed on the stack supposedly initializing 1GB of
 data. When `s` is passed to `gun`, a copy of it is going to be performed, allocating and
-initializing a new `VeryBigStruct` object. Considering that `s` is no longer used
+initializing a new `ExpensiveStruct` object. Considering that `s` is no longer used
 in the `main` function, the compiler could take advantage of this situation and perform
 a move, thus "stealing" the already allocated object. This will result in eliding a copy
 constructor call (avoiding the initialization cost) and also a destructor call. It is safe
-to do so because `s` is no longer used after it has been moved.
+to do so because `s` is no longer accesible after it has been moved.
 
-2. Working with uncopyable objects
+2. Working with noncopyable objects
 
 ```d
 struct A
@@ -88,13 +88,14 @@ void main()
 }
 ```
 
-The above code will not compile as `A` is uncopyable and `fun` receives its parameter by
+The above code will not compile as `A` is noncopyable and `fun` receives its parameter by
 value so a copy of `a` should be performed, however, since `fun(a)` is the last access of `a`
 it can be safely moved.
 
-If such operations would be implemneted in the compiler, the user would have no means
+If such operations would be implemented in the compiler, the user would have no means
 to control the moving of objects. DIP1014 proposed a solution for this problem, however
-it leverages a flawed and soon to be deprecated component: the postblit.
+it leverages the postblit, which is flawed as discussed in DIP 1018 (and in more detail
+in the next section) and soon to be deprecated following the implementation of DIP1018.
 
 ### DIP1014 Issues
 
@@ -121,16 +122,16 @@ From the above definition it can be deduced that `opPostMove` (that is called in
 have the same type. This makes it so that the following valid code will be rejected:
 
 ```d
-struct VeryBigStruct
+struct ExpensiveStruct
 {
     /* 1 GB of data */
-    void opPostMove(const ref VeryBigStruct) {}
+    void opPostMove(const ref ExpensiveStruct) {}
 }
 
-void gun(VeryBigStruct s);
+void gun(ExpensiveStruct s);
 void main()
 {
-    const VeryBigStruct s = VeryBigStruct(/*some params*/);
+    const ExpensiveStruct s = ExpensiveStruct(/*some params*/);
     /* do something */
     gun(s);               // s may be moved
     /* do other stuff, but s is not accessed anymore */
@@ -200,15 +201,15 @@ solved, as discussed in DIP1018.
 ### Introducing the Move Constructor
 
 DIP1014 makes a strong argument on the necessity of defining and implementing move semantics,
-but its design does not take into account the problems that were discovered with the postblit
+but its design does not take into account the problems encountered with the postblit
 during the development of DIP1018, thus making it liable of the same issues.
 
 In this context, the current DIP proposes the implementation of a move constructor, that will
 bring the following benefits, as opposed to DIP1014:
 
- * the feature is used to good effect in the C++ language [3];
+ * a similar feature is used to good effect in the C++ language [3];
  * being a constructor, it will allow updating of `const`/`immutable` fields;
- * it will use the same pattern as the copy constructor implementation, which has succesfully
+ * it uses the same pattern as the copy constructor implementation, which has succesfully
    replaced the postblit;
  * does not require any druntime changes; the feature will be implemented entirely in the compiler;
 
@@ -249,7 +250,7 @@ A call to the move constructor is implicitly inserted by the compiler whenever a
 is moved in memory: whevener an rvalue is passed as a function parameter, the move constructor will
 be called.
 
-When returning from a function, the result is either an rvalue or an lvalue. If the result
+For a given <code>return</code> statement, the result is either an rvalue or an lvalue. If the result
 is an rvalue, in all situations RVO is going to be performed; if the result is an lvalue,
 then either NRVO is going to be applied, or the copy constructor is going to get called.
 If NRVO cannot be performed, it means that the returned object is referenced from outside
