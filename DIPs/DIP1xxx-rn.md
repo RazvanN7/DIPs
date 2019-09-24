@@ -1,4 +1,4 @@
-# Move Constructor
+# Move Semantics
 
 
 | Field           | Value                                                           |
@@ -12,16 +12,11 @@
 
 ## Abstract
 
-Currently, the DMD compiler does not perform any move operations: function return values
-are typically constructed directly in the destination memory, eliding the destruction of
-the source, an optimization known as Return Value Optimization. This leads to the missing
-of some optimization opportunities in certain scenarios, that could be easily implemented.
-However, if the moving of objects would be implemented, with the current state of
-affairs, it would lead to the impossibility of implementing certain programming patterns
-like `struct`s that contain internal pointers and `struct`s that register themselves in a
-global registry.
+Currently, the DMD compiler automatically performs move operations in specific situations.
+The default move operation is to simply copy from one memory location to another. This approach
+has the shortcomming that objects with internal pointers cannot be correctly handled.
 
-DIP1014 [1] details the above mentioned scenarios and proposes a solution in
+DIP1014 [1] details the above mentioned scenario and proposes a solution in
 the form of a postblit-like callback method called `opPostMove`. In parallel with the
 development of DIP1014, DIP1018 [2] has uncovered a series of issues that affect the
 postblit, which ultimately led to the decision of replacing it with a classical copy constructor.
@@ -29,8 +24,8 @@ The postblit-like nature of the `opPostMove` function makes it susceptible to th
 encountered in DIP1018.
 
 The current DIP highlights the above mentioned issues and proposes the implementation of a
-C++ style move constructor as an alternative solution to enable the compiler to perform
-move operations in a controlled manner.
+C++ style move constructor/move assign operator as an alternative solution to enable the
+compiler to perform move operations in a controlled manner.
 
 ## Contents
 * [Rationale](#rationale)
@@ -45,57 +40,42 @@ move operations in a controlled manner.
 
 ### Move semantics
 
-Even though it is specified that D compilers may perform move operations, DMD
-currently never moves, although there are situations in whic it would make
-sense to do so (while preserving correctness):
-
-1. Forwarding a parameter passed by value or a local variable to another function:
+Consider the following code snippet:
 
 ```d
-struct ExpensiveStruct { /* 1 GB of data */ }
+struct S
+{
+   long f;
+   long* p;
+}
 
-void gun(ExpensiveStruct s);
+S get()
+{
+    S r;
+    r.p = &r.f;
+    return r;
+}
+
+void fun(S a)
+{
+    assert(a.p == &a.f);
+}
+
 void main()
 {
-    ExpensiveStruct s = ExpensiveStruct(/*some params*/);
-    /* do something */
-    gun(s);
-    /* do other stuff, but s is not accessed anymore */
+   fun(get());   // need for move constructor
+   S a;
+   a = get();    // need for move assignment operator
+   assert(a.p == &a.f);
 }
 ```
 
-In the above situation, `s` was constructed on the stack supposedly initializing 1GB of
-data. When `s` is passed to `gun`, a copy of it is going to be performed, allocating and
-initializing a new `ExpensiveStruct` object. Considering that `s` is no longer used
-in the `main` function, the compiler could take advantage of this situation and perform
-a move, thus "stealing" the already allocated object. This will result in eliding a copy
-constructor call (avoiding the initialization cost) and also a destructor call. It is safe
-to do so because `s` is no longer accesible after it has been moved.
+The natural expectation is that the asserts should pass, because the returned objects
+from `get` have had their pointers to explicitly point to the internal field, however,
+due to the moving that happens behind the scenes (that the user cannot control)
+`f` is now located at a different address and the asserts fails. This makes it
+impossible to consistently use objects that contain internal pointers.
 
-2. Working with noncopyable objects
-
-```d
-struct A
-{
-    @disable this(ref A rhs) {}
-}
-
-void fun(A a) {}
-void main()
-{
-    A a;
-    fun(a);     // error: A cannot be copied
-}
-```
-
-The above code will not compile as `A` is noncopyable and `fun` receives its parameter by
-value so a copy of `a` should be performed, however, since `fun(a)` is the last access of `a`
-it can be safely moved.
-
-If such operations would be implemented in the compiler, the user would have no means
-to control the moving of objects. DIP1014 proposed a solution for this problem, however
-it leverages the postblit, which is flawed as discussed in DIP 1018 (and in more detail
-in the next section) and soon to be deprecated following the implementation of DIP1018.
 
 ### DIP1014 Issues
 
@@ -122,25 +102,22 @@ From the above definition it can be deduced that `opPostMove` (that is called in
 have the same type. This makes it so that the following valid code will be rejected:
 
 ```d
-struct ExpensiveStruct
+struct D
 {
-    /* 1 GB of data */
-    void opPostMove(const ref ExpensiveStruct) {}
+    void opPostMove(const ref D) {}
 }
 
-void gun(ExpensiveStruct s);
+const(D) fun();
+void gun(D s);
 void main()
 {
-    const ExpensiveStruct s = ExpensiveStruct(/*some params*/);
-    /* do something */
-    gun(s);               // s may be moved
-    /* do other stuff, but s is not accessed anymore */
+    gun(fun());
 }
 ```
 
-In this situation, the source type is `const D` (`typeof(s)`), while destination type is `D`. Even though the
-`opPostMove` function is correctly defined, it will not get called because the signature of
-`__move_post_blt` function in druntime does not accomodate the handling of differently qualified
+In this situation, the source type is `const D` (`typeof(fun())`), while the destination type is `D`.
+Even though the `opPostMove` function is correctly defined, it will not get called because the signature
+of `__move_post_blt` function in druntime does not accomodate the handling of differently qualified
 sources and destinations. It seems that the intention in DIP1014 (following the postblit guidelines)
 was to handle solely same source-destination types.
 
@@ -198,77 +175,104 @@ explanation).
 Although point (1) may be mitigated by changing the signature of `__move_post_blt`, point (2) cannot be
 solved, as discussed in DIP1018.
 
-### Introducing the Move Constructor
+### Introducing move semantics
 
 DIP1014 makes a strong argument on the necessity of defining and implementing move semantics,
 but its design does not take into account the problems encountered with the postblit
 during the development of DIP1018, thus making it liable of the same issues.
 
-In this context, the current DIP proposes the implementation of a move constructor, that will
-bring the following benefits, as opposed to DIP1014:
+In this context, the current DIP proposes the implementation of a move constructor and a move assignment
+operator that will bring the following benefits:
 
  * a similar feature is used to good effect in the C++ language [3];
- * being a constructor, it will allow updating of `const`/`immutable` fields;
+ * the move constructor will allow updating of `const`/`immutable` fields;
  * it uses the same pattern as the copy constructor implementation, which has succesfully
    replaced the postblit;
  * does not require any druntime changes; the feature will be implemented entirely in the compiler;
 
 ## Description
 
-This section discusses all the technical aspects regarding the semantics of the move constructor.
+This section discusses all the technical aspects regarding the semantics of the move constructor/move assign operator.
 
 ### Syntax
 
-Inside a `struct` definition, a declaration is a move constructor declaration if it is a constructor
-declaration that takes the first parameter by value (non-default) and the type of the parameter is of
-the same type as the `struct` being defined. Additional parameters may follow if and only if all have
-default values. Declaring a move constructor in this manner has the advantage that no parser
-modifications are required, thus leaving the language grammar unchanged. Example:
+Inside a `struct` definition, a declaration is a move constructor declaration if it is a copy constructor
+declaration and the first parameter is annotated with `@rvalue`:
 
 ```d
 import std.stdio;
 
 struct A
 {
-    this(A rhs) { writeln("x"); }                     // move constructor
-    this(A rhs, int b = 7) immutable { writeln(b); }  // move constructor with default parameter
+    this(@rvalue ref A rhs) {}                       // move constructor
+    this(@rvalue ref A rhs, int b = 7) immutable {}  // move constructor with default parameter
 }
 ```
 
-Type qualifiers may be applied to the parameter of the move constructor and also to the function
-itself, in order to allow defining moves across objects of different mutability levels. The
+Inside a `struct` definition, a declaration is a move assign operator declaration if it is an assignment
+operator declaration that receives its parameter by `ref`, the parameter is of the same unqualified type
+as the `struct` containing it and the parameter is annotated with @rvalue:
+
+```d
+import std.stdio;
+
+struct A
+{
+    void opAssign(@rvalue ref A rhs) {}                   // move assignment operator
+    void opAssign(@rvalue A rhs, int b = 7) immutable {}  // move assignment operator with default parameter
+}
+```
+
+Type qualifiers may be applied to the parameter of the move constructor/move assign operator and also
+to the function itself, in order to allow defining moves across objects of different mutability levels. The
 type qualifiers are optional.
 
 ### Semantics
 
 This section discusses all the aspects of the semantic analysis and interaction between the move
-constructor and other language features.
+constructor/move assign operator and other language features.
 
 #### Move Constructor Usage
 
-A call to the move constructor is implicitly inserted by the compiler whenever a `struct` variable
-is moved in memory: whevener an rvalue is passed as a function parameter, the move constructor will
-be called.
+A call to the move constructor is implicitly inserted by the compiler whevener an rvalue is passed
+as a function parameter.
 
-For a given <code>return</code> statement, the result is either an rvalue or an lvalue. If the result
-is an rvalue, in all situations RVO is going to be performed; if the result is an lvalue,
-then either NRVO is going to be applied, or the copy constructor is going to get called.
-If NRVO cannot be performed, it means that the returned object is referenced from outside
-the function so it also cannot be moved.
+When an instance of an object is constructed from an rvalue, the move constructor is not called
+because NRVO is performed.
+
+#### Move Assignment Operator Usage
+
+A call to the move assignment operator is implicitly inserted by the compiler whenever an object
+is assigned to an rvalue:
+
+```d
+struct S
+{
+    void opAssign(@rvalue ref S) {}
+}
+
+S fun();
+
+void main()
+{
+    S a;
+    a = fun();      // move constructor call
+}
+```
 
 #### Overloading
 
-The move constructor can be overloaded with different qualifiers applied to
-the parameter (moving from a qualified source) or to the move constructor
+The move constructor/move assign operator can be overloaded with different qualifiers
+applied to the parameter (moving from a qualified source) or to the move constructor/move assign operator
 itself (move to a qualified destination):
 
 ```d
 struct A
 {
-    this(A another) {}                        // 1 - mutable source, mutable destination
-    this(immutable A another) {}              // 2 - immutable source, mutable destination
-    this(A another) immutable {}              // 3 - mutable source, immutable destination
-    this(immutable A another) immutable {}    // 4 - immutable source, immutable destination
+    this(@rvalue ref A another) {}                        // 1 - mutable source, mutable destination
+    this(@rvalue ref immutable A another) {}              // 2 - immutable source, mutable destination
+    this(@rvalue ref A another) immutable {}              // 3 - mutable source, immutable destination
+    this(@rvalue ref immutable A another) immutable {}    // 4 - immutable source, immutable destination
 }
 ```
 
@@ -276,22 +280,23 @@ The proposed model enables the user to define the move from an object of
 any qualified type to an object of any qualified type: any combination of
 two among mutable, `const`, `immutable`, `shared`, `const shared`.
 
-The inout qualifier may be applied to the move constructor parameter in
+The inout qualifier may be applied to the move constructor/move assignment operator parameter in
 order to specify that mutable, `const`, or `immutable` types are treated the same.
 
 #### Typechecking
 
 The move constructor type-check is identical to that of the constructor [3][4].
+The move assignment operator type-check is identical to that of the `opAssign` function.
 
-Move constructor overloads can be explicitly disabled:
+Move constructor/move assignment overloads can be explicitly disabled:
 
 ```d
 struct A
 {
     int* p;
-    @disable this(A rhs) {}
-    this(immutable A rhs) {}
-    A opAssign(A rhs) {}
+    @disable this(@rvalue ref A rhs) {}
+    this(@rvalue ref immutable  A rhs) {}
+    @disable void opAssign(@rvalue ref A rhs) {}
 }
 
 
@@ -304,31 +309,33 @@ void main()
 
 In order to disable move construction, all move constructor overloads need to be disabled.
 Note that the line `a = fun();` is lowered to `a.opAssign(fun());`, but it will still result
-in a compilation error since the result of `fun` needs to be move constructed into `opAssign`'s
-parameter and that specific move constructor is disabled.
+in a compilation error because the move assignment operator is disabled.
 
 #### Move Constructor vs. Implicit Move
 
-Whenever a move constructor is defined for a `struct`, all implicit moving is disabled:
+Whenever a move constructor/move assignment operator is defined for a `struct`, all implicit
+move construction/move assignemnt is disabled:
 
 ```d
 struct A
 {
     int* p;
-    this(A rhs) {}
+    this(@rvalue ref A rhs) {}
+    void opAssign(@rvalue ref A rhs) {}
 }
 
 void fun(immutable A);
+immutable(A) gun();
 
 void main()
 {
+    fun(gun());           // error: cannot call move constructor type (immutable A) immutable
     immutable A a;
-    fun(a);           // error: cannot call move constructor type (immutable A) immutable
-                      // this is a the last access of a, so it can be treated as an rvalue
+    a = gun();
 }
 ```
 
-#### Generating Move Constructors
+#### Generating Move Constructors/Move Assign Operators
 
 A move constructor is generated implicitly by the compiler for a `struct S` if all of the
 following conditions are met:
@@ -340,10 +347,15 @@ not overlapped (by means of `union`) with any other member.
 If the restrictions above are met, the following move constructor is generated:
 
 ```d
-this(inout(S) src) inout
+this(@rvalue ref inout(S) src) inout
 {
-    foreach (i, ref inout field; src.tupleof)
-        this.tupleof[i].moveConstructor(field);
+    static foreach (i, ref inout field; src.tupleof)
+    {
+        static if (hasElaborateMoveConstructor!(typeof(field)))
+            this.tupleof[i].moveConstructor(field);
+        else
+            this.tupleof[i] = field;
+    }
 }
 ```
 
@@ -351,6 +363,9 @@ Note that the above code is going to access each field in the source exactly onc
 this means that each can be treated as an rvalue, thus calling the move constructor.
 If a specific field does not define a move constructor the generated move constructor
 is going to fail to typecheck and it will be annotated with `@disable`.
+
+The generation of move assign operators is done the similarly: the move `opAssign` is called
+for every field that defines one.
 
 ### Perfect Forwarding
 
@@ -377,89 +392,125 @@ is always going to be an lvalue, regardless of the instantiation value type.
 This is problematic for perfect forwarding because if `fun` is called with
 an rvalue, the rvalueness cannot pe forwarded to the wrapped function.
 
-The solution proposed by this DIP is to identify via a dataflow analysis algorithm the
-last access of a by value parameter/local variable and handle it as an rvalue access.
-This simple enhacement does not only solve the perfect forwarding problem but also it
-makes the code in certain situations more efficient without any user intervention.
+The following section, further describes the situation.
 
-#### Dataflow Analysis Algorithm
+#### Current situation:
 
-The access of a variable `x` is considered the last access in a function if :
+Currently, if a function receives an argument by value `void callee(S a)`, the following situations may occur
+at caller site:
 
-  * `x` is part of a `return` statement;
-  * there are no other statements that access `x` until the end of the function
-    and no gotos pointing to a label that precedes the access of `x`;
+ * call `callee` with an lvalue: callee(a)   => 1 copy
+ * call `callee` with an rvalue: callee(S()) => 1 move
 
-The algorithm that identifies the last access of `x` is the following:
+The closest situation to perfect forwarding that one can achieve in D is via `auto ref` parameters:
 
-  * Each statement in the function body is analyzed in the order of appearance
-    in user code;
-  * If a statement does not access `x` it is skipped;
-  * If a statement does access `x`, it will be marked as the new last access,
-    while the previous marked statement will be cleared. If the previous last access
-    was a `return` statement, then it will not be cleared. `return` statements that
-    access `x` are always the last access of it.
-  * `while`/`for`/`do-while`/`foreach` statements that contain accesses of `x`
-    will not be considered candidates for last access, except if the accesses
-    are inside `return` statements;
-  * If a statement that accesses `x` is preceded by a label and between the mentioned
-    statement and the end of the function scope there is a goto pointing to the mentioned
-    label, the access will not be considered a candidate for last access;
+`void wrapper(T)(auto ref T a) { called(a); }`
 
-Example:
+At caller site the following situations might occur:
+
+ * call `wrapper` with an lvalue: wrapper(a)    => 0 (by ref) + 1 copy = 1 copy
+ * call `wrapper` with an rvalue: wrapper(S())  => 1 move (by val) + 1 copy = 1 move + 1 copy
+
+As it can be observed, when `wrapper` is called with an rvalue it does an extra copy.
+
+If a function receives an argument by ref `void calee(ref S a)`, the following situations may occur at
+caller site:
+
+ * call `callee` with an lvalue: callee(a)   => 0
+ * call `callee` with an rvalue: callee(S()) => error
+
+Trying to implement perfect forwarding for this function by means of `void wrapper(T)(auto ref T a) { callee(a); }`
+yields:
+
+ * call `wrapper` with an lvalue: wrapper(a)   => 0 (by ref) + 0 = 0
+ * call `wrapper` with an rvalue: wrapper(S()) => 1 move (by val) + 0 = 1 move
+
+As it can be observed, the difference lies in the fact that when `wrapper` is called with an rvalue
+it does a move instead issuing an error.
+
+As an alternative, the standard library offers support for `forward` and `move` functions, where `forward`
+is implemented as:
 
 ```d
-void gun(int);
-void sun(int);
-void run(int);
-int bun(int);
-
-int fun(int x)
+auto ref forward(alias arg)()
 {
-    if (x < 2)
-        gun(x);
+    static if (__traits(isRef, arg))
+    {
+        return arg;
+    }
     else
-        sun(x);
-
-label1:
-    if (bun(x) < 0)
-        goto label1;
-
-    if (bun(x) > 5)
-        goto label2;
-
-    run(x);
-label2:
-    return x;
+    {
+        import std.algorithm.mutation : move;
+        return move(arg);
+    }
 }
 ```
 
-In the above example, the first use of `x` is in the line `x < 2`. The statement is then considered,
-for the moment, the last access of `x` and it will be marked as such. Next, the bodies of the `if`
-and the `else` branch will be considered: both access `x`, but since the execution is going to take
-one path or the other, both accesses are considered to be the last access, thus clearing `x < 2`.
-When `bun(x) < 0` is encountered, it will be considered as a candidate for last access, but only if there
-are no `goto`'s targeting `label1` until the end of the function scope. When `goto label1` is encountered,
-`bun(x) < 0` is dropped from the list of candidates. At this point, there is not statement that we can
-safely consider as being the last access of `x`. The analysis continues with `if(bun(x) > 5`, which
-becomes the new candidate; the statement `goto label2` is ignored, because gotos that jump in the
-front do not affect the algorithm. When `run(x)` is encountered, it will become the new last access,
-while clearing the previous one. Finally, when `return x` is reached it becomes the last access and
-it cleares `run(x)` from the list of candidates.
+Therefore `wrapper` can be implemented as:
 
-`e1 || e2` and `e1 && e2` expressions are treated the following way:
+`wrapper(T)(auto ref T a) { callee(forward!a); }`
 
-  * if `e1` accesses `x` and `e2` does not, then `e1` is the last access of `x`;
-  * if `e2` accesses `x` and `e1` does not, then `e2` is the last access of `x`;
-  * if both `e1` and `e2` access `x`, then `e2` is the last access of `x`;
+With this version, we have the following situations:
 
-If the `||` and `&&` operators are present in the condition or body of repetitive instructions
-(`for`, `while` etc.) the acceese to `x` will not be considered last access candidates.
+1. `void callee(S a)`. When `wrapper` is called:
 
-Whenever the address of an rvalue parameter/local variable is taken it will lose the
-possibility of being treated as an rvalue upon its last access. If the user knows
-that an access is the last access of an lvalue, it can use the `move` function in
-`std.algorithm.mutation`, thus transforming the lvalue into an rvalue.
+ * with an lvalue: 0 (by ref) + 0 (`forward` returns a ref) + 1 copy (by val to `callee`) = 1 copy.
+ * with an rvalue: 1 move (by val) + 1 move (call to `move` which calls the move constructor) = 2 moves.
+
+Here we can observe that an extra move is performed.
+
+2. `void callee(ref S a)`. When wrapper is called:
+
+ * with an lvalue: 0 (by ref) + 0 (`forward` returns ref) + 0 (by ref to `callee`) = 0.
+ * with an rvalue: 1 move (by value to `wrapper`) + 1 move (call to `move` which calls the move constructor) = 2 moves.
+
+Again, we have 2 moves instead of issuing an error.
+
+Using `auto ref` as is has the downfall of converting an rvalue into an lvalue inside the body of the wrapper function.
+Even though we may reason if the parameter was provided by an rvalue or an lvalue, this does not change the fact that
+the parameter will be treated as an lvalue inside the function body.
+
+
+#### @rvalue
+
+void wrapper(T)(@rvalue auto ref T a) { callee(a); }
+
+1. `@rvalue` can be used solely with `auto ref` parameters.
+2. `@rvalue` does not affect overload resolution.
+3. After overload resolution and template instantiation a `@rvalue` parameter can be either `@rvalue T` or `@rvalue ref T`, but the compiler always passes the argument by reference.
+4. Inside the function body `@rvalue T` means "a reference to an rvalue", `@rvalue ref T` means "a reference to an lvalue".
+5. When calling a function with an `@rvalue T` argument we have the following situations:
+
+   * the callee receives the argument by `ref`; in this situation the compiler will issue an error: "Cannot take a reference to an rvalue"
+   * the callee receives the argument by value; in this situation a move is performed
+   * the callee receives the argument by `@rvalue auto ref`; in this situation the callee will be instantianted to receive `@rvalue` i.e. a reference to an rvalue.
+
+6. When calling a function with an `@rvalue ref T` argument, the rules are the same as if it was a simple `ref T` argument.
+
+7. When a code is compiled with `-preview=rvaluerefparam`, the semantics do not change because `auto ref` will still bind the rvalue
+to the non-ref function (otherwise `auto ref` can simply be translated to `ref`).
+8. If the last access rules are implemented, `@rvalue T` parameters are exempt from those rules.
+9. `@rvalue T` parameters (or rvalue references) cannot be passed to `ref` parameters, except if the parameter is marked as `@rvalue`.
+10. `@rvalue T ` parameters act as rvalues when they are used as function arguments, but they act as lvalues in all other situations. If a `@rvalue` variable is used after it was moved an error is issued.
+11. Member variables of `@rvalue` parameters are treated under the same rules as non-`@rvalue` parameters.
+The purpose of `@rvalue` is to instruct the compiler that a specific parameter is going to be forwarded to
+another function at some point. Whatever actions are taken regarding the fields of an `@rvalue` object must
+not alter it before it was forwarded.
+12. It is unsafe to take the address of a `@rvalue T` parameter.
+
+Example:
+
+1. void callee(S a):
+
+  * wrapper(a)    => 0 (@rvalue ref S) + 1 copy = 1 copy
+  * wrapper(S())  => 0 (@rvalue S)     + 1 move (rule 5b) = 1 move
+
+2. void callee(ref S a):
+
+  * wrapper(a)   => 0 (@rvalue ref S) + 0 (by ref) = 0
+  * wrapper(S()) => 0 (@rvalue S)     + error(rule 5a)    = error
+
+
 
 
 ### Limitations
